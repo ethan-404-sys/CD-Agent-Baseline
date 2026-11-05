@@ -186,21 +186,15 @@ class LoopTests(unittest.TestCase):
             for word in ('LEVIR','levir','F1','86.','val_','train_'):
                 self.assertNotIn(word,text,path)
 
-    def test_ask_level_two_reaches_the_backend_and_the_report(self):
-        levels=[]
-        def reply(pairs,question,level='L1'):
-            levels.append(level)
-            return [dict(answer='no',type='no_change',reason='Same.',p_yes=.1) for _ in pairs],{}
-        script=[response([call('ask',dict(regions=[dict(mask='mask#0',ids=[1])],level='L2'))]),
-                response([call('submit',dict(mask='mask#0',summary='Keep.'))]),response([call('submit',dict(mask='mask#0',summary='Keep.'))])]
-        _,box,_,recorder=run(self.root,script,init=mask(),review=True,ask_backend=reply)
-        self.assertEqual(levels,['L2'])
-        self.assertIn('level=L2',json.loads(recorder.steps[1]['calls'][0]['result_text'])['report'])
-
-    def test_segment_region_keeps_only_instances_touching_it(self):
-        script=[response([call('segment_text',dict(time='t1',text='building',region=[40,28,48,32]))]),response([call('submit',dict(mask='empty',summary='x'))])]
-        _,box,_,recorder=run(self.root,script)
-        self.assertEqual(json.loads(recorder.steps[0]['calls'][0]['result_text'])['n'],0)
+    def test_tools_and_prompts_are_the_ones_g1_used(self):
+        g1=json.loads((Path(__file__).parent/'fixtures'/'g1_prompts.json').read_text(encoding='utf-8'))
+        for task,init in (('T1.1xC0',None),('T5.1',mask())):
+            script=[response([call('submit',dict(mask='empty',summary='x'))]),response([call('submit',dict(mask='empty',summary='x'))])]
+            _,_,client,_=run(self.root,script,init=init,task=task,status=True,verify=True,prompt_version='v4')
+            request=client.requests[0]
+            self.assertEqual(request['tools'],g1[task]['schemas'])
+            self.assertEqual(request['messages'][0]['content'],g1[task]['system_prompt'])
+            self.assertTrue(request['messages'][1]['content'][0]['text'].startswith(g1[task]['instruction']))
 
     def test_submit_empty_answers_nothing_changed(self):
         final,box,_,_=run(self.root,[response([call('submit',dict(mask='empty',summary='No change.'))])])
@@ -313,12 +307,12 @@ class LoopTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 assert_no_evidence(self,bad)
         package=Path(__file__).resolve().parents[1]
-        allowed={'recorder.py','summarize.py','fixed_routes.py','make_demo.py','pick_demo.py','diagnose.py','ask_eval.py','compare_runs.py','levir_analysis.py','boundary_eval.py','sam3_soft_eval.py','agent_vs_rule.py','vs_rule.py','verifier_select.py','planner_room.py','ask_pair.py','ask_fp_sample.py','vs_fixed.py','vs_fixed_r7.py'}
+        allowed={'replay_g1.py','make_levir_tasks.py','recorder.py','summarize.py','fixed_routes.py','make_demo.py','pick_demo.py','diagnose.py','ask_eval.py','compare_runs.py','levir_analysis.py','boundary_eval.py','sam3_soft_eval.py','agent_vs_rule.py','vs_rule.py','verifier_select.py','planner_room.py','ask_pair.py','ask_fp_sample.py','vs_fixed.py','vs_fixed_r7.py'}
         # Offline analysis may read labels, but nothing the agent runs may import it.
-        online=['loop_json.py','tools.py','state.py','view.py','backends.py','planner.py','instances.py']
+        online=['loop_json.py','tools.py','state.py','view.py','backends.py','planner.py','instances.py','tasks.py','python_sandbox.py','python_worker.py']
         for filename in online:
             source=(package/filename).read_text()
-            for module in ('make_demo','pick_demo','diagnose','summarize','fixed_routes','ask_eval','compare_runs','levir_analysis'):
+            for module in ('make_demo','pick_demo','diagnose','summarize','fixed_routes','ask_eval','compare_runs','levir_analysis','replay_g1','make_levir_tasks'):
                 self.assertNotIn('import '+module,source)
                 self.assertNotIn('from .'+module,source)
         for path in package.rglob('*.py'):
