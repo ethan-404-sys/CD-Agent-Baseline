@@ -27,23 +27,41 @@ class Instances:
 
 
 class Session:
-    def __init__(self, shape, init_mask=None, target="building", change_direction="any", instruction=None, constraint=None, scope=None):
-        from prompts import scope_card
+    def __init__(self, shape, init_mask=None, target="building", change_direction="any", instruction=None, constraint=None, scope=None, region_mask=None, targets=None, feedback_points=None, feedback_cells=None, source_classes=None, ask_variant=None):
+        from .scope_t13 import scope_card
+        target = tuple(targets) if targets is not None else target
         scope_card(target, change_direction, scope)
+        if source_classes is not None and (target != 'building' or change_direction != 'appeared'
+                or list(source_classes) != ['low vegetation', 'non-vegetated ground surface']):
+            raise ValueError('Source classes require the declared ground/vegetation to building conversion')
+        from .scope_t13 import ASK_CANDIDATES
+        if ask_variant is not None and (target != 'any change' or ask_variant not in ASK_CANDIDATES):
+            raise ValueError('ask_variant requires any change and a declared candidate')
+        self.source_classes = tuple(source_classes) if source_classes is not None else None
+        self.ask_variant = ask_variant
         self.scope = scope
         self.target, self.change_direction = target, change_direction
         self.instruction, self.constraint = instruction, constraint
         self.shape = tuple(shape)
+        self.feedback_points = None if feedback_points is None else tuple(tuple(p) for p in feedback_points)
+        self.feedback_cells = None if feedback_cells is None else tuple(feedback_cells)
         self.handles = {}
         self.next_id = 0
         self.current_mask = None
         self.initial_mask = None
+        self.region_mask = None
+        self.region_bbox = None
         self.submitted = None
         self.summary = None
         self.view_count = 0
         if init_mask is not None:
             self.initial_mask = self.add_mask(init_mask)
             self.current_mask = self.initial_mask
+        if region_mask is not None:
+            self.region_mask = self.add_mask(region_mask, handle='region#0')
+            yy, xx = np.nonzero(self.get(self.region_mask, Mask).data)
+            if len(xx):
+                self.region_bbox = [int(xx.min()), int(yy.min()), int(xx.max()) + 1, int(yy.max()) + 1]
 
     def _put(self, prefix, value):
         key = f'{prefix}#{self.next_id}'
@@ -51,7 +69,7 @@ class Session:
         self.handles[key] = value
         return key
 
-    def add_mask(self, data, parents=(), labeled=None):
+    def add_mask(self, data, parents=(), labeled=None, handle=None):
         data = np.array(data, dtype=bool, copy=True)
         if data.shape != self.shape:
             raise ValueError('backend mask shape differs from image shape')
@@ -59,7 +77,11 @@ class Session:
         labels, comps = labeled if labeled is not None else components(data)
         data.flags.writeable = labels.flags.writeable = False
         comps = tuple(MappingProxyType(dict(c, bbox=tuple(c['bbox']))) for c in comps)
-        return self._put('mask', Mask(data, labels, comps, tuple(parents)))
+        value = Mask(data, labels, comps, tuple(parents))
+        if handle is not None:
+            self.handles[handle] = value
+            return handle
+        return self._put('mask', value)
 
     def add_instances(self, items, time, parents=()):
         copied = []

@@ -17,7 +17,9 @@ from pathlib import Path
 import re
 import numpy as np
 from scipy import ndimage as ndi
-from prompts import VERIFY, verifier_prompts
+from prompts import VERIFY
+from .scope_t13 import verifier_prompts, session_prompts, session_card
+from .tools_t13 import ProposalTools, tool_schemas, enabled_names, extend_schemas, NAMES as T13_NAMES
 from . import instances
 from common import components
 from .state import Session, Mask, Instances, ToolError, chosen_ids
@@ -25,6 +27,10 @@ from .view import render_view, box_pixels, ask_images
 
 MATCH_BASIS = 'raw'
 MAX_ASK = 64
+BIG_BOX_SHARE = .10
+# Opposite direction only; rebuilt and pseudo changes have no single direction.
+OPPOSITE_TYPES = {'appeared': {'demolished', 'removed_tree'},
+                  'disappeared': {'new_building', 'new_tree'}}
 CURRENT = 'By default the returned mask becomes your current answer; pass set_current=false for intermediate candidates.'
 
 
@@ -90,25 +96,26 @@ PLAN_SCHEMA = schema('plan', 'Write or replace your own short to-do list for thi
 SKILL_SCHEMA = schema('load_skill', 'Read the full text of one skill from the index in the system prompt.', dict(name=S), ['name'])
 PYTHON_SCHEMA = schema('python', 'Run array calculations in an isolated Python subprocess with np and ndi. Inputs: masks[handle] (H,W bool), instances[handle] (N,H,W bool, only for handles written out in the code), images["t1"/"t2"] (H,W,3 uint8), all read-only. Call save_mask(array) for each output mask. No filesystem, network or submission access. New handles become usable in the next reply; submit them with submit. ' + CURRENT,
     dict(code=S, set_current=SET_CURRENT), ['code'])
-SCHEMA_BY_NAME = {s['function']['name']: s['function']['parameters'] for s in [*SCHEMAS, PLAN_SCHEMA, SKILL_SCHEMA, PYTHON_SCHEMA]}
+SCHEMA_BY_NAME = {s['function']['name']: s['function']['parameters'] for s in [*SCHEMAS, PLAN_SCHEMA, SKILL_SCHEMA, PYTHON_SCHEMA, *tool_schemas()]}
 
 
-def session_schemas(session, python=False):
+def session_schemas(session, python=False, tools_t13=False):
     import copy
     schemas = copy.deepcopy(SCHEMAS)
     if (session.target, session.change_direction) != ('building', 'any'):
         ask = next(s['function'] for s in schemas if s['function']['name'] == 'ask')
-        ask['description'] = ask['description'].replace('building change', f'{session.target} change')
+        label = 'any land-cover change' if session.target == 'any change' else 'changes involving ' + ', '.join(session.target) if isinstance(session.target,(list,tuple)) else f'{session.target} change'
+        ask['description'] = ask['description'].replace('building change', label)
         if session.change_direction != 'any':
             ask['description'] += f' Count only the {session.change_direction} direction.'
     if session.scope:
-        from prompts import scope_card
-        card = scope_card(session.target, session.change_direction, session.scope)
+        from .scope_t13 import scope_card
+        card = session_card(session)
         ask = next(s['function'] for s in schemas if s['function']['name'] == 'ask')
         ask['description'] += ' Scope: ' + '; '.join(card['counts'] + card['not_counts'])
     if python:
         schemas.append(copy.deepcopy(PYTHON_SCHEMA))
-    return schemas
+    return extend_schemas(schemas, tools_t13)
 SKILLS = Path(__file__).parent / 'skills'
 
 
@@ -212,13 +219,15 @@ def failure(code, message):
     return Result(dict(ok=False, error_code=code, message=message))
 
 
-class Toolbox:
-    def __init__(self, rgb, directory, segment=None, prompt=None, ask=None, session=None, init_mask=None, python=False):
+class Toolbox(ProposalTools):
+    def __init__(self, rgb, directory, segment=None, prompt=None, ask=None, session=None, init_mask=None, python=False, tools_t13=False, vision=None, gate3=False, big_box_share=BIG_BOX_SHARE):
         self.rgb = tuple(np.array(im, copy=True) for im in rgb)
         self.session = session or Session(self.rgb[0].shape[:2], init_mask)
         self.directory = Path(directory)
         self.segment_backend, self.prompt_backend, self.ask_backend = segment, prompt, ask
         self.python_enabled = python
+        self.tools_t13 = enabled_names(tools_t13)
+        self.vision_backend = vision
         self.allowed = None
         self.meta = {}
         # Verifier answers by exact component outline, so they survive renumbering and lapse when an outline changes.
@@ -227,6 +236,9 @@ class Toolbox:
         self.proposal = None
         self.todo = []
         self.skills = ()
+        if not 0 < big_box_share <= 1:
+            raise ValueError('big_box_share must be in (0, 1]')
+        self.gate3, self.big_box_share = gate3, big_box_share
 
     def get(self, key, kind=None):
         return self.session.get(key, kind, self.allowed)
@@ -238,7 +250,7 @@ class Toolbox:
         started_at = clock.time()
         self.allowed, self.meta = allowed, {}
         try:
-            if name not in SCHEMA_BY_NAME or (name == 'python' and not self.python_enabled):
+            if name not in SCHEMA_BY_NAME or (name == 'python' and not self.python_enabled) or (name in T13_NAMES and name not in self.tools_t13):
                 raise ToolError('bad_args', 'Unknown tool name.')
             validate(args, SCHEMA_BY_NAME[name])
             pyinspect.signature(getattr(self, name)).bind(**args)
@@ -331,6 +343,13 @@ class Toolbox:
         return np.asarray(data, bool), float(quality)
 
     def segment_prompt(self, time, box=None, points=None, point_labels=None):
+        if self.gate3 and box is not None and points is None:
+            x0, y0, x1, y1 = box_pixels(box, self.session.shape)
+            share = (x1-x0) * (y1-y0) / np.prod(self.session.shape)
+            if share > self.big_box_share:
+                raise ToolError('box_too_large', 'A box prompt segments one object. '
+                    f'This box covers {100*share:.2f}% of the image. For several objects or a whole area, '
+                    'use segment_text, then intersect with a region if needed.')
         data, quality = self._prompt(time, box, points, point_labels)
         return self._mask(data, set_current=False, bbox=bbox(data), sam_quality=quality)
 
@@ -377,7 +396,7 @@ class Toolbox:
     def verify(self, expanded, source):
         context = getattr(self.ask_backend, 'context', False)
         pairs = [ask_images(self.rgb, item.labels == c['id'], c['bbox'], context) for _, item, c in expanded]
-        question = verifier_prompts(self.session.target, self.session.change_direction, self.session.scope)['VERIFY']
+        question = session_prompts(self.session)['VERIFY']
         if hasattr(self.ask_backend, 'session'):
             self.ask_backend.session = self.session
         rows, meta = self._backend(self.ask_backend, pairs, question)
@@ -405,6 +424,10 @@ class Toolbox:
             raise ToolError('bad_args', 'area_min must not exceed area_max.')
         rows = [r for r in item.items if r['id'] in wanted and pred(r)
                 and (area_min is None or r['area'] >= area_min) and (area_max is None or r['area'] <= area_max)]
+        if set.startswith('props#'):
+            result = self._props(rows, item.time, (set,))
+            result.update(ids=[r['id'] for r in rows], n_in=len(item.items), n_out=len(rows))
+            return result
         key = self.session.add_instances(rows, item.time, (set,))
         return dict(inst=key, ids=[r['id'] for r in rows], n_in=len(item.items), n_out=len(rows))
 
@@ -514,9 +537,40 @@ class Toolbox:
             answered[self.latest(entry) or ('unparsed' if entry else 'none')].append(c)
         return answered
 
-    def pending(self, item):
+    def feedback_limited(self):
+        return self.gate3 and (self.session.feedback_points is not None or self.session.feedback_cells is not None)
+
+    def relevant(self, item, comparison=None):
+        """Public point disks/cells plus changed outlines relative to mask#0.
+
+        For an original component, comparison is the proposed mask; any removal
+        counts as a change, including a complete deletion. No ground truth is used.
+        """
+        from .feedback import cell_mask
+        s = self.session
+        region = np.zeros(s.shape, bool)
+        yy, xx = np.ogrid[:s.shape[0], :s.shape[1]]
+        for x, y in s.feedback_points or ():
+            region |= (xx-x)**2 + (yy-y)**2 <= 32**2
+        for where in s.feedback_cells or ():
+            region |= cell_mask(where, s.shape)
+        start = s.get(s.initial_mask, Mask) if s.initial_mask else None
+        original = {np.flatnonzero(start.labels == c['id']).tobytes() for c in start.components} if start else set()
+        selected = set()
+        for c in item.components:
+            pixels = item.labels == c['id']
+            changed = (not comparison.data[pixels].all() if comparison is not None
+                       else np.flatnonzero(pixels).tobytes() not in original)
+            if changed or region[pixels].any():
+                selected.add(c['id'])
+        return selected
+
+    def pending(self, item, comparison=None):
         """Components the verifier still owes an answer: never asked, or unparsed once and allowed one retry."""
         rows = sorted(item.components, key=lambda c: (-c['area'], c['id']))
+        if self.feedback_limited():
+            relevant = self.relevant(item, comparison)
+            rows = [c for c in rows if c['id'] in relevant]
         out = []
         for c in rows:
             entry = self.entry(item, c)
@@ -529,8 +583,14 @@ class Toolbox:
         rows = self.pending(item)
         if self.session.initial_mask is not None:
             start = self.session.get(self.session.initial_mask, Mask)
-            rows = rows + [c for c in self.pending(start) if item.data[start.labels == c['id']].mean() < .5]
+            rows = rows + self.dropped_pending(start, item)
         return rows
+
+    def dropped_pending(self, start, item):
+        if self.feedback_limited():
+            return [c for c in self.pending(start, comparison=item)
+                    if not item.data[start.labels == c['id']].all()]
+        return [c for c in self.pending(start) if item.data[start.labels == c['id']].mean() < .5]
 
     def stage(self, key):
         """The fixed verification stage: every component of this mask still without an answer. Never edits a mask."""
@@ -539,7 +599,7 @@ class Toolbox:
         if self.session.initial_mask is not None:
             # Given components the planner dropped unasked: the report must be able to say what they were.
             start = self.session.get(self.session.initial_mask, Mask)
-            todo += [(self.session.initial_mask, start, c) for c in self.pending(start) if item.data[start.labels == c['id']].mean() < .5]
+            todo += [(self.session.initial_mask, start, c) for c in self.dropped_pending(start, item)]
         self.meta = {}
         failed = False
         if todo:
@@ -631,8 +691,30 @@ class Toolbox:
         if previous is not None and previous != key:
             before = self.session.get(previous, Mask).data
             lines.append(f"Compared with your previous proposal {previous}: {int((item.data & ~before).sum())} pixels added, {int((before & ~item.data).sum())} pixels removed.")
+        if self.gate3:
+            lines.extend(self.constraint_report(item))
         lines.append(f"A verifier answer is evidence, not an order, and it can be wrong in both directions. No answer is not an error. To finish with this mask, call submit with {key} again. To change it, edit and submit the new handle; components the verifier has not seen will be reported again. In the summary, say what you changed, and why you went against any verifier answer. You have {replies_left} replies left.")
         return '\n'.join(lines)
+
+    def constraint_report(self, item):
+        lines = []
+        if self.session.region_mask is not None:
+            region = self.session.get(self.session.region_mask, Mask).data
+            outside = item.data & ~region
+            if outside.any():
+                ids = sorted(int(i) for i in np.unique(item.labels[outside]))
+                lines.append(f'Outside region#0: {int(outside.sum())} pixels in component IDs {ids}.')
+        types = set(session_prompts(self.session)['PSEUDO_TYPES'])
+        opposite = OPPOSITE_TYPES.get(self.session.change_direction, set()) & types
+        wrong = []
+        for c in item.components:
+            records = (self.entry(item, c) or dict(records=[]))['records']
+            last = next((r for r in reversed(records) if r.get('type') in types), None)
+            if last and last['type'] in opposite:
+                wrong.append(c['id'])
+        if wrong:
+            lines.append(f'Opposite-direction verifier types for {self.session.change_direction}: component IDs {sorted(wrong)} (types {sorted(opposite)}).')
+        return lines
 
     def ledger(self, final_key):
         """Per outline: every verifier answer and what the planner finally did with it. For the trace only."""
