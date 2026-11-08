@@ -28,7 +28,7 @@
 cd code && python -m unittest discover -s agent_baseline/tests -t .
 ```
 
-只需 numpy、Pillow、scipy；185 个测试在这份副本里通过，其中 3 个需要服务器上冻结的 `code_g` 源码，这里会自动跳过。真正跑实验需要服务器上的模型、数据和 `results/` 目录，这里没有。
+只需 numpy、Pillow、scipy；185 个测试在这份副本里通过，其中 3 个需要服务器上冻结的参考源码（`code_g`、`code_q`），这里会自动跳过。真正跑实验需要服务器上的模型、数据和 `results/` 目录，这里没有。
 
 ## 没有拷贝的内容
 
