@@ -2,7 +2,7 @@
 
 这是 [CD-Agent](https://github.com/ethan-404-sys/cd-agent) 中 **Agent baseline**（LEVIR-CD 上由 Agent 调度原子工具的变化检测 baseline）的精简副本，只放代码、任务设置和设计文档，方便 Gemini 等工具直接阅读。`results/agent_baseline/` 只带文字和数据（md/json/txt），轨迹展示页（每个 1.6–3.8 MB 的 HTML）、旧实验和大文件都留在原仓库。
 
-- 来源：`cd-agent` 分支 `claude/project-thread-2tuaib`，提交 `7ee05c1`（2026-11-08 同步）。
+- 来源：`cd-agent` 分支 `claude/project-thread-2tuaib`，提交 `72dc5ee`（2026-11-10 同步）。
 - 目录结构与原仓库一致，所以 `code/agent_baseline/__init__.py` 能按相对路径找到 `code/ovcd_v0/`。
 
 ## 从哪里读
@@ -28,7 +28,7 @@
 cd code && python -m unittest discover -s agent_baseline/tests -t .
 ```
 
-只需 numpy、Pillow、scipy；185 个测试在这份副本里通过，其中 3 个需要服务器上冻结的参考源码（`code_g`、`code_q`），这里会自动跳过。真正跑实验需要服务器上的模型、数据和 `results/` 目录，这里没有。
+只需 numpy、Pillow、scipy；190 个测试在这份副本里通过，其中 3 个需要服务器上冻结的参考源码（`code_g`、`code_q`），这里会自动跳过。真正跑实验需要服务器上的模型、数据和 `results/` 目录，这里没有。
 
 ## 没有拷贝的内容
 
