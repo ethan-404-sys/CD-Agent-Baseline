@@ -1,37 +1,75 @@
-# CD-Agent-Baseline
+# CD-Agent — Gemini 阅读版项目背景
 
-这是 [CD-Agent](https://github.com/ethan-404-sys/cd-agent) 中 **Agent baseline**（LEVIR-CD 上由 Agent 调度原子工具的变化检测 baseline）的精简副本，只放代码、任务设置和设计文档，方便 Gemini 等工具直接阅读。`results/agent_baseline/` 只带文字和数据（md/json/txt），轨迹展示页（每个 1.6–3.8 MB 的 HTML）、旧实验和大文件都留在原仓库。
+本仓库是 [CD-Agent](https://github.com/ethan-404-sys/CD-Agent) 的**精简阅读副本**，面向 Gemini 等外部模型。目的：快速了解研究背景、Agent/Harness 架构、任务设置和已有实验结果；**不是**最新可运行代码的完整镜像。
 
-- 来源：`cd-agent` 分支 `claude/project-thread-2tuaib`，提交 `72dc5ee`（2026-11-10 同步）。
-- 目录结构与原仓库一致，所以 `code/agent_baseline/__init__.py` 能按相对路径找到 `code/ovcd_v0/`。
+**内容来源**：CD-Agent 工作分支 `claude/project-thread-2tuaib`，参考提交 `25bc69acc948817c287922735579dcab81917bf0`；2026-11-13 整理。任务页面已同步，架构和结果采用面向阅读的简表。原有大量代码与旧数据文件作为历史参考保留，**不要把旧文件当成最新研究版本**。
 
-## 从哪里读
+## 先读这四段（即使只能读取 README）
 
-| 路径 | 内容 |
-| --- | --- |
-| `doc/agent_baseline/README_ai.md` | **先读这个**：给 AI 的开发文档（背景、规范、最新决定、工具、轨迹格式、优化记录） |
-| `doc/agent_baseline/index.html` | 同一内容给人看的版本 |
-| `doc/agent_baseline/task_system.html` | 任务设置：任务场景 × 附加约束 |
-| `doc/cd_agent_task_design.html` | 变化检测智能体任务设置（T1.1 × C0、T5.1 等编号的定义） |
-| `code/agent_baseline/IMPL_NOTES.md` | 实现与维护说明（模块边界、相对任务书的偏离） |
-| `code/agent_baseline/README_generalization.md` | 泛化重构说明：目标类别与变化方向参数化（`scopes/`、`tasks.py`）、JSONL 任务清单、可选的沙箱 python 工具 |
-| `code/agent_baseline/` | baseline 全部代码：`loop_json.py` 主循环、`tools.py` 工具与 schema、`planner.py`、`backends.py`、`recorder.py`、`prompts/` 系统提示、`skills/`、`workers/`、`analysis/`、`tests/` |
-| `code/ovcd_v0/` | 只保留 agent_baseline 直接 import 的依赖模块：`common` `prompts` `mllm` `render` `sam_tools` `sam3_t7` `items` |
-| `code/agent_baseline/README_second.md` | SECOND 数据集 C1 实验说明 |
-| `code/agent_baseline/README_t52.md` `README_t53.md` `README_t12_c1t.md` `README_tools_t13.md` | 扩展任务说明：T5.2 点反馈、T5.3 语言反馈、T1.2 / C1 转移、T1.3 / T3 工具 |
-| `results/agent_baseline/` | 结果：`levir_analysis.md`、`data/` 下各轮对比与 SECOND 指标（`second_metrics.md` 等）、展示页的 README |
-| `code/probe/sam3_tools.py` | SAM3 构建函数（worker 和 `sam3_soft.py` 用到） |
+### 1. 背景
 
-## 运行测试
+研究对象是**遥感双时相变化检测智能体（Change Detection Agent）**：给定同一区域两个时相的遥感图像与自然语言要求，智能体调用视觉基础模型、图像处理和判断工具，生成或更新目标变化掩码，并记录全过程。与“固定检测流程 + 最后调用语言模型”不同，Agent 可以依据中间观察和工具结果动态选择动作；不同任务可以要求类别、变化方向、空间限制、视觉示例或用户反馈。
 
-```bash
-cd code && python -m unittest discover -s agent_baseline/tests -t .
+### 2. 核心 Agent / Harness 架构
+
+```text
+T1/T2 影像 + 自然语言指令 + 可选初始掩码/约束
+                      ↓
+                  Planner
+                      ↓ tool call
+    Harness：工具 schema/预算/状态管理/失败处理
+                      ↓
+    view / segment_text(SAM3) / match_instances
+    ask(视觉核验) / combine / refine / add / remove ...
+                      ↓
+                状态句柄与反馈
+                      ↺
+               验证、submit
+                      ↓
+          变化掩码 + 摘要 + 轨迹
 ```
 
-只需 numpy、Pillow、scipy；190 个测试在这份副本里通过，其中 3 个需要服务器上冻结的参考源码（`code_g`、`code_q`），这里会自动跳过。真正跑实验需要服务器上的模型、数据和 `results/` 目录，这里没有。
+规划器与核验器可分工；中间掩码与实例通常存放在 Session 中，通过句柄传递。记录器保留工具链、状态和结果；真值只用于评测，不反馈给 Agent。可在 `AGENT_ARCHITECTURE.md` 查看更详细的角色分工。
 
-## 没有拷贝的内容
+### 3. 任务体系
 
-- `results/agent_baseline/demo*/T*.html` 轨迹展示页（共 8 个，约 20 MB），以及 `results/` 下其他旧实验结果
-- `code/ovcd_v0/` 中其余的旧实验脚本（`rounds_r*.py`、`figs_*`、`page/` 等）、`code/probe/` 其余脚本
-- `previous_work/`、`audit/`、`figures/`、`interim/` 以及其他旧实验文档
+任务按照 **T1–T5 × C0–C4** 构建（并非所有组合都适用）：
+
+- **T1** 常见目标类别变化；**T2** 稀缺目标类别变化；**T3** 根据视觉示例定义变化；
+- **T4** 根据文字描述、指代或空间关系定义变化；**T5** 更新已有检测结果（掩码、反馈、地图等）。
+- **C0–C4** 表示额外条件或约束，如变化方向、范围等；具体组合与编号以任务配置页面为准。
+
+代表性任务：T1.1 × C0（指定类别从零检测）、T1.1 × C1（新建/拆除等方向）、T5.1（已有掩码修正）、T5.2/T5.3（点框/语言反馈）。详细定义见 `TASK_SYSTEM.md` 与 `doc/agent_baseline/task_system.html`（可视化原件）。
+
+### 4. 已有实验（只陈列数据，留给读者自行判断）
+
+以下为工作分支 2026-11-10 左右汇总的**代表性** F1（%），数据集和任务不可交叉比较：
+
+| 任务 | Agent | 对照 |
+| --- | ---: | ---: |
+| T1.1 × C0，LEVIR 验证 | 85.76（G3） | 规则 86.35 |
+| T1.1 × C0，LEVIR 测试 | 82.63（G1） | 规则 80.97 |
+| T1.1 × C1，SECOND 新建 | 71.31（G3） | 相对规则 +7.57 |
+| T1.1 × C1，SECOND 拆除 | 48.45（G3） | 相对规则 +10.49 |
+| T1.2，SECOND | 41.22 | 相对固定路线 −5.04 |
+| T1.3，SECOND | 46.53 | 相对固定路线 −14.35 |
+| T3.1，SECOND | 20.34 | 相对固定路线 +0.95 |
+| T5.2，LEVIR 验证，k=1 / 3 | 84.19 / 84.59 | 相对给定掩码 +1.03 / +1.43 |
+
+其他任务（T1.1 × C2/C4、T5.1/T5.3/T5.4、WHU 等）与对照见 `EXPERIMENT_RESULTS.md`。这些是特定配置的历史结果，若需最新详细实验请回原仓库核对。
+
+## 重点阅读文件
+
+| 文件 | 内容 |
+| --- | --- |
+| [TASK_SYSTEM.md](TASK_SYSTEM.md) | 任务分类与示例的简明文字版 |
+| [AGENT_ARCHITECTURE.md](AGENT_ARCHITECTURE.md) | Planner、Harness、Toolbox、Verifier 与 Recorder |
+| [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md) | 多任务代表性数字 |
+| [doc/agent_baseline/task_system.html](doc/agent_baseline/task_system.html) | **任务设置可视化 HTML** |
+| [doc/cd_agent_task_design.html](doc/cd_agent_task_design.html) | 任务设计背景 HTML |
+| [code/agent_baseline/](code/agent_baseline/) | 旧版基线实现，供查阅，不作为最新代码 |
+| [results/agent_baseline/](results/agent_baseline/) | 旧版实验数据与分析快照 |
+
+**相关可视化（源仓库）**：[OVCD 复核页](https://github.com/ethan-404-sys/CD-Agent/blob/main/results/ovcd_v0_review.html)、[流水线页面](https://github.com/ethan-404-sys/CD-Agent/blob/main/results/pipeline.html)。这些主要是背景与历史流程图，不能替代当前 Agent 架构文字。
+
+> 给 Gemini：如果你实际只读到了 README，请直接说明；不要声称已经阅读了链接中的文件。用户会单独提供当前研究问题和需要你完成的任务。
